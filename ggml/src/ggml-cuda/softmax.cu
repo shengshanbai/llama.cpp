@@ -4,6 +4,9 @@
 
 #ifdef GGML_USE_HIP
 #include <hip/hip_cooperative_groups.h>
+#elif defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
+// CoreX SDK does not provide cooperative_groups/reduce.h
+// Disable cooperative groups path for Iluvatar
 #else
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
@@ -138,6 +141,8 @@ static __global__ void soft_max_f32(
 }
 
 // TODO: Template to allow keeping ncols in registers if they fit
+#if !defined(GGML_USE_ILUVATAR) && !defined(__ILUVATAR__)
+// Cooperative groups not available in CoreX SDK
 static __device__ void soft_max_f32_parallelize_cols_single_row(const float * __restrict__ x,
                                                                 float * __restrict__ dst,
                                                                 float * __restrict__ tmp_maxs,
@@ -242,6 +247,7 @@ static __device__ void soft_max_f32_parallelize_cols_single_row(const float * __
         col += step_size * n_elem_per_thread;
     }
 }
+#endif // !defined(GGML_USE_ILUVATAR) && !defined(__ILUVATAR__)
 
 #ifdef __clang__
 #pragma clang diagnostic pop
@@ -299,6 +305,8 @@ static void launch_soft_max_kernels(const float * x, const T * mask, const float
     soft_max_f32<true, 0, 0><<<block_nums, block_dims, nbytes_shared, stream>>>(x, mask, sinks, dst, p);
 }
 
+#if !defined(GGML_USE_ILUVATAR) && !defined(__ILUVATAR__)
+// Cooperative groups kernel not available in CoreX SDK
 __launch_bounds__(8*WARP_SIZE, 1) static __global__ void soft_max_f32_parallelize_cols(const float * __restrict__ x,
                                                      float * __restrict__ dst,
                                                      float * __restrict__ tmp_maxs,
@@ -315,6 +323,7 @@ __launch_bounds__(8*WARP_SIZE, 1) static __global__ void soft_max_f32_paralleliz
                                                  tmp_sums, p);
     }
 }
+#endif // !defined(GGML_USE_ILUVATAR) && !defined(__ILUVATAR__)
 
 template <typename T>
 static void soft_max_f32_cuda(const float *                                x,
@@ -344,6 +353,8 @@ static void soft_max_f32_cuda(const float *                                x,
         // Parallelize across SMs for top-p/dist-sampling
         // The heuristic for parallelizing rows across SMs vs parallelizing single row & looping over all rows was done on the basis of a B6000 GPU and
         // Can be adapted further for lower-SM-count GPUs, though keeping data in registers should be implemented first as that is the optimal solution.
+#if !defined(GGML_USE_ILUVATAR) && !defined(__ILUVATAR__)
+        // Cooperative launch not supported in CoreX SDK
         if (ggml_cuda_info().devices[id].supports_cooperative_launch &&
             ncols_x / (params.ne01 * params.ne02 * params.ne03) > 8192 && mask == nullptr && sinks == nullptr &&
             params.scale == 1.0f && params.max_bias == 0.0f) {
@@ -356,10 +367,13 @@ static void soft_max_f32_cuda(const float *                                x,
                                                    dim3(ggml_cuda_info().devices[id].nsm, 1, 1),
                                                    dim3(WARP_SIZE * 8, 1, 1), kernel_args, 0, stream));
         } else {
+#endif // !defined(GGML_USE_ILUVATAR) && !defined(__ILUVATAR__)
             const size_t nbytes_shared_low = WARP_SIZE * sizeof(float);
             soft_max_f32<false, 0, 0>
                 <<<block_nums, block_dims, nbytes_shared_low, stream>>>(x, mask, sinks, dst, params);
+#if !defined(GGML_USE_ILUVATAR) && !defined(__ILUVATAR__)
         }
+#endif // !defined(GGML_USE_ILUVATAR) && !defined(__ILUVATAR__)
     }
 }
 

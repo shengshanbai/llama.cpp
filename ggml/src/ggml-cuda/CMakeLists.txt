@@ -57,6 +57,15 @@ if (CUDAToolkit_FOUND)
 
     enable_language(CUDA)
 
+    # For Clang/ILUVATAR CUDA compiler (Iluvatar CoreX), override default nvcc flags
+    # CMake may detect the compiler as "ILUVATAR" or "Clang" depending on context
+    if (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR")
+        # Clear nvcc-specific default flags that CMake adds
+        set(CMAKE_CUDA_COMPILE_OPTIONS "")
+        # Set appropriate flags for Clang CUDA
+        set(CMAKE_CUDA_FLAGS "--cuda-path=/usr/local/corex")
+    endif()
+
     # TODO: Remove once CCCL 3.2 has been released and bundled with CUDA Toolkit
     if (GGML_CUDA_CUB_3DOT2)
         include(FetchContent)
@@ -102,25 +111,60 @@ if (CUDAToolkit_FOUND)
     list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda.h")
 
     file(GLOB   GGML_SOURCES_CUDA "*.cu")
+
+    # Check if using Clang/ILUVATAR as CUDA compiler early for file exclusion
+    # Iluvatar CoreX SDK has issues with complex CUDA kernels (CFG annotation, SGPR spill)
+    if (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR")
+        # Exclude flash attention files - CoreX SDK cannot handle complex CFG
+        list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "fattn.*\\.cu$")
+        # Exclude matrix multiplication quantization files - SGPR spill issues
+        list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "mmq\\.cu$")
+        list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "mmvq\\.cu$")
+        list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "mmf\\.cu$")
+        list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "mmid\\.cu$")
+        list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "mmv\\.cu$")
+        # Add stub implementations for excluded functions
+        list(APPEND GGML_SOURCES_CUDA "iluvatar-stubs.cu")
+        message(STATUS "Iluvatar build: excluding flash attention and matrix mul quant files due to SDK compiler limitations")
+    endif()
+
     file(GLOB   SRCS "template-instances/fattn-tile*.cu")
-    list(APPEND GGML_SOURCES_CUDA ${SRCS})
+    # Skip fattn template files for Iluvatar
+    if (NOT (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR"))
+        list(APPEND GGML_SOURCES_CUDA ${SRCS})
+    endif()
     file(GLOB   SRCS "template-instances/fattn-mma*.cu")
-    list(APPEND GGML_SOURCES_CUDA ${SRCS})
+    if (NOT (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR"))
+        list(APPEND GGML_SOURCES_CUDA ${SRCS})
+    endif()
     file(GLOB   SRCS "template-instances/mmq*.cu")
-    list(APPEND GGML_SOURCES_CUDA ${SRCS})
+    # Skip mmq template files for Iluvatar
+    if (NOT (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR"))
+        list(APPEND GGML_SOURCES_CUDA ${SRCS})
+    endif()
     file(GLOB   SRCS "template-instances/mmf*.cu")
-    list(APPEND GGML_SOURCES_CUDA ${SRCS})
+    if (NOT (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR"))
+        list(APPEND GGML_SOURCES_CUDA ${SRCS})
+    else()
+        # Also exclude mmv template files for Iluvatar
+        file(GLOB   SRCS_MMV "template-instances/mmv*.cu")
+        list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "mmv.*\\.cu$")
+    endif()
 
     if (GGML_CUDA_FA_ALL_QUANTS)
         file(GLOB   SRCS "template-instances/fattn-vec*.cu")
-        list(APPEND GGML_SOURCES_CUDA ${SRCS})
+        if (NOT (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR"))
+            list(APPEND GGML_SOURCES_CUDA ${SRCS})
+        endif()
         add_compile_definitions(GGML_CUDA_FA_ALL_QUANTS)
     else()
-        list(APPEND GGML_SOURCES_CUDA
-            template-instances/fattn-vec-instance-f16-f16.cu
-            template-instances/fattn-vec-instance-q4_0-q4_0.cu
-            template-instances/fattn-vec-instance-q8_0-q8_0.cu
-            template-instances/fattn-vec-instance-bf16-bf16.cu)
+        if (NOT (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR"))
+            list(APPEND GGML_SOURCES_CUDA
+                template-instances/fattn-vec-instance-f16-f16.cu
+                template-instances/fattn-vec-instance-q4_0-q4_0.cu
+                template-instances/fattn-vec-instance-q8_0-q8_0.cu
+                template-instances/fattn-vec-instance-bf16-bf16.cu)
+        endif()
     endif()
 
     ggml_add_backend_library(ggml-cuda
@@ -146,7 +190,8 @@ if (CUDAToolkit_FOUND)
         add_compile_definitions(GGML_CUDA_NO_VMM)
     endif()
 
-    if (NOT GGML_CUDA_FA)
+    if (NOT GGML_CUDA_FA OR (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR"))
+        # Flash attention disabled by user, or automatically disabled for Iluvatar
         add_compile_definitions(GGML_CUDA_NO_FA)
     endif()
 
@@ -193,14 +238,34 @@ if (CUDAToolkit_FOUND)
 
     set(CUDA_CXX_FLAGS "")
 
-    set(CUDA_FLAGS -use_fast_math -extended-lambda)
+    # Check if using Clang/ILUVATAR as CUDA compiler (for Iluvatar/CoreX compatibility)
+    # CMake may identify the compiler as "Clang" or "ILUVATAR" depending on detection phase
+    if (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR")
+        # Clang CUDA compiler (Iluvatar CoreX) - use ivcore language
+        set(CUDA_FLAGS --cuda-path=/usr/local/corex)
+        # Add ivcore-specific flags
+        list(APPEND CUDA_FLAGS -x ivcore)
+        # Enable C++17 for CUDA code (required for constexpr if, std::is_same_v, etc.)
+        list(APPEND CUDA_FLAGS -std=c++17)
+        # Define ILUVATAR macro for conditional compilation
+        add_compile_definitions(GGML_USE_ILUVATAR __ILUVATAR__)
+        # Clang does not support nvcc-specific flags like -extended-lambda
+    else()
+        # NVIDIA nvcc compiler
+        set(CUDA_FLAGS -use_fast_math -extended-lambda)
+    endif()
 
     if (GGML_CUDA_DEBUG)
-        list(APPEND CUDA_FLAGS -lineinfo)
+        if (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR")
+            # Clang debug flags
+            list(APPEND CUDA_FLAGS -g)
+        else()
+            list(APPEND CUDA_FLAGS -lineinfo)
+        endif()
         add_compile_definitions(GGML_CUDA_DEBUG)
     endif()
 
-    if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
+    if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8" AND NOT (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR"))
         # Options are:
         # - none (not recommended)
         # - speed (nvcc's default)
@@ -210,7 +275,11 @@ if (CUDAToolkit_FOUND)
     endif()
 
     if (GGML_FATAL_WARNINGS)
-        list(APPEND CUDA_FLAGS -Werror all-warnings)
+        if (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR")
+            list(APPEND CUDA_FLAGS -Werror)
+        else()
+            list(APPEND CUDA_FLAGS -Werror all-warnings)
+        endif()
     endif()
 
     if (GGML_ALL_WARNINGS AND NOT MSVC)
@@ -245,24 +314,57 @@ if (CUDAToolkit_FOUND)
         message(STATUS "CUDA host compiler is ${CUDA_CCID} ${CUDA_CCVER}")
 
         ggml_get_flags(${CUDA_CCID} ${CUDA_CCVER})
-        list(APPEND CUDA_CXX_FLAGS ${CXX_FLAGS} ${GF_CXX_FLAGS})  # This is passed to -Xcompiler later
+        if (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR")
+            # For Clang CUDA compiler, add flags directly (no -Xcompiler needed)
+            list(APPEND CUDA_FLAGS ${CXX_FLAGS} ${GF_CXX_FLAGS})
+        else()
+            list(APPEND CUDA_CXX_FLAGS ${CXX_FLAGS} ${GF_CXX_FLAGS})  # This is passed to -Xcompiler later
+        endif()
     endif()
 
     if (NOT MSVC)
-        list(APPEND CUDA_CXX_FLAGS -Wno-pedantic)
+        if (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR")
+            # For Clang CUDA compiler, add flags directly
+            list(APPEND CUDA_FLAGS -Wno-pedantic)
+        else()
+            list(APPEND CUDA_CXX_FLAGS -Wno-pedantic)
+        endif()
     else()
         # CCCL 3.2 onwards will require a cpp-standard-compliant preprocessor for MSVC
         # https://github.com/NVIDIA/cccl/pull/6827
         list(APPEND CUDA_CXX_FLAGS /Zc:preprocessor)
     endif()
 
-    list(JOIN   CUDA_CXX_FLAGS " " CUDA_CXX_FLAGS_JOINED)  # pass host compiler flags as a single argument
-
-    if (NOT CUDA_CXX_FLAGS_JOINED STREQUAL "")
-        list(APPEND CUDA_FLAGS -Xcompiler ${CUDA_CXX_FLAGS_JOINED})
+    # For nvcc, join CXX flags and pass via -Xcompiler
+    if (NOT (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR"))
+        list(JOIN   CUDA_CXX_FLAGS " " CUDA_CXX_FLAGS_JOINED)  # pass host compiler flags as a single argument
+        if (NOT CUDA_CXX_FLAGS_JOINED STREQUAL "")
+            list(APPEND CUDA_FLAGS -Xcompiler ${CUDA_CXX_FLAGS_JOINED})
+        endif()
     endif()
 
     target_compile_options(ggml-cuda PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:${CUDA_FLAGS}>")
+
+    # For Clang/ILUVATAR CUDA compiler, remove nvcc-specific flags that CMake adds by default
+    if (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang" OR CMAKE_CUDA_COMPILER_ID STREQUAL "ILUVATAR")
+        # Remove nvcc-specific flags that Clang doesn't support
+        # These flags are added by CMake's CUDA support but are nvcc-specific
+        get_target_property(_current_cuda_flags ggml-cuda CUDA_COMPILE_OPTIONS)
+        if (_current_cuda_flags)
+            list(REMOVE_ITEM _current_cuda_flags "-use_fast_math" "-extended-lambda")
+            set_target_properties(ggml-cuda PROPERTIES CUDA_COMPILE_OPTIONS "${_current_cuda_flags}")
+        endif()
+        # Also try to remove via compile options
+        target_compile_options(ggml-cuda PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-fno-fast-math>")
+        # Iluvatar CoreX SDK requires disabling Tail Call and Sibling Call optimizations
+        # These optimizations create complex CFG that the SDK's llc cannot handle
+        # Use SHELL: prefix to keep -mllvm arguments grouped together
+        target_compile_options(ggml-cuda PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:SHELL:-fno-optimize-sibling-calls>")
+        # Enable Iluvatar function call optimization (required for GPU function calls)
+        target_compile_options(ggml-cuda PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:SHELL:-mllvm -iluvatar-function-calls=true>")
+        # Enable SGPR spill to SMEM when SGPR limit reached
+        target_compile_options(ggml-cuda PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:SHELL:-mllvm --iluvatar-spill-sgpr-to-smem>")
+    endif()
 else()
     message(FATAL_ERROR "CUDA Toolkit not found")
 endif()

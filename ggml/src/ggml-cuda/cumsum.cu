@@ -16,6 +16,70 @@ static __global__ void cumsum_cub_kernel(
         const int64_t  s01, const int64_t  s02, const int64_t  s03,
         const int64_t   s1,  const int64_t   s2,  const int64_t   s3) {
 #ifdef GGML_CUDA_USE_CUB
+#if defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
+    // Iluvatar CoreX SDK: simplified version without loop unrolling
+    using BlockScanT = cub::BlockScan<T, BLOCK_SIZE>;
+
+    __shared__ typename BlockScanT::TempStorage temp_storage;
+    __shared__ T block_carry;
+
+    const int tid = threadIdx.x;
+    constexpr int UNROLL_FACTOR = 4;
+    constexpr int TILE_SIZE = BLOCK_SIZE * UNROLL_FACTOR;
+
+    const int64_t i1 = blockIdx.x;
+    const int64_t i2 = blockIdx.y;
+    const int64_t i3 = blockIdx.z;
+
+    if (i1 >= ne01 || i2 >= ne02 || i3 >= ne03) {
+        return;
+    }
+
+    const T * src_row = src + i1 * s01 + i2 * s02 + i3 * s03;
+    T *       dst_row = dst + i1 * s1  + i2 * s2  + i3 * s3;
+
+    if (tid == 0) {
+        block_carry = 0;
+    }
+    __syncthreads();
+
+    for (int64_t start = 0; start < ne00; start += TILE_SIZE) {
+        T items[UNROLL_FACTOR];
+        T thread_sum = T(0);
+
+        // Iluvatar: no unrolling
+        for (int i = 0; i < UNROLL_FACTOR; i++) {
+            int64_t idx = start + tid * UNROLL_FACTOR + i;
+            T val = (idx < ne00) ? src_row[idx] : T(0);
+            thread_sum += val;
+            items[i] = thread_sum;
+        }
+
+        // Block-wide scan on thread sums
+        T thread_prefix;
+        T block_total;
+        BlockScanT(temp_storage).InclusiveSum(thread_sum, thread_prefix, block_total);
+        __syncthreads();
+
+        // Add offset to each item and store
+        T thread_offset = thread_prefix - thread_sum + block_carry;
+        // Iluvatar: no unrolling
+        for (int i = 0; i < UNROLL_FACTOR; i++) {
+            int64_t idx = start + tid * UNROLL_FACTOR + i;
+            if (idx < ne00) {
+                dst_row[idx] = items[i] + thread_offset;
+            }
+        }
+
+        __syncthreads();
+
+        // Update carry for next tile
+        if (tid == 0) {
+            block_carry += block_total;
+        }
+    }
+#else
+    // Original NVIDIA CUDA version with loop unrolling
     using BlockScanT = cub::BlockScan<T, BLOCK_SIZE>;
 
     __shared__ typename BlockScanT::TempStorage temp_storage;
@@ -76,6 +140,7 @@ static __global__ void cumsum_cub_kernel(
             block_carry += block_total;
         }
     }
+#endif // defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
 #else
     NO_DEVICE_CODE;
 #endif // GGML_CUDA_USE_CUB
@@ -129,6 +194,17 @@ static __global__ void cumsum_kernel(
 
         // thread local sequential scan
         temp[0] = (idx < ne00 ? src_row[idx] : T(0));
+#if defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
+        // Iluvatar CoreX SDK: no loop unrolling
+        for (int64_t j = 1; j < num_unroll; j++) {
+            temp[j] = temp[j - 1];
+            if (idx + j < ne00) {
+                temp[j] += src_row[idx + j];
+            } else {
+                temp[j] += 0;
+            }
+        }
+#else
 #pragma unroll
         for (int64_t j = 1; j < num_unroll; j++) {
             temp[j] = temp[j - 1];
@@ -138,6 +214,7 @@ static __global__ void cumsum_kernel(
                 temp[j] += 0;
             }
         }
+#endif
 
         // last emenent is sum of all values assigned to thread
         float val = (idx < ne00) ? ggml_cuda_cast<float, T>(temp[num_unroll - 1]) : 0.0f;
@@ -169,12 +246,21 @@ static __global__ void cumsum_kernel(
         // calculate sum offset for this thread
         float final_val_offset = s_vals[tid] + s_warp_sums[warp] + carry - temp[num_unroll - 1];
 
+#if defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
+        // Iluvatar CoreX SDK: no loop unrolling
+        for (int32_t j = 0; j < num_unroll; j++) {
+            if (idx + j < ne00) {
+                dst_row[idx + j] = temp[j] + ggml_cuda_cast<T, float>(final_val_offset);
+            }
+        }
+#else
 #pragma unroll
         for (int32_t j = 0; j < num_unroll; j++) {
             if (idx + j < ne00) {
                 dst_row[idx + j] = temp[j] + ggml_cuda_cast<T, float>(final_val_offset);
             }
         }
+#endif
 
         __syncthreads();
 
@@ -219,6 +305,25 @@ static void cumsum_cuda(
         cudaStream_t stream) {
 
     const size_t type_size = sizeof(T);
+#if defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
+    // Iluvatar: disable CUB path, use simple fallback kernel only
+    dim3 grid_dims(ne01, ne02, ne03);
+    const auto &info = ggml_cuda_info().devices[ggml_cuda_get_device()];
+    const int warp_size = info.warp_size;
+    const int num_warps = (ne00 + warp_size - 1) / warp_size;
+    int block_size = num_warps * warp_size;
+    block_size = std::min(block_size, CUDA_CUMSUM_BLOCK_SIZE);
+    dim3 block_dims(block_size, 1, 1);
+    const int warps_per_block = block_size / warp_size;
+    const size_t shmem_size = (block_size + warps_per_block + 2) * sizeof(float);
+
+    cumsum_kernel<<<grid_dims, block_dims, shmem_size, stream>>>(
+        src, dst,
+        ne00, ne01, ne02, ne03,
+        nb00 / type_size, nb01 / type_size, nb02 / type_size, nb03 / type_size,
+        nb0 / type_size, nb1 / type_size, nb2 / type_size, nb3 / type_size
+    );
+#else
     bool use_cub = false;
 #ifdef GGML_CUDA_USE_CUB
     // Check if we can use CUB (data must be contiguous along innermost dimension)
@@ -262,6 +367,7 @@ static void cumsum_cuda(
             nb0 / type_size, nb1 / type_size, nb2 / type_size, nb3 / type_size
         );
     }
+#endif // defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
 }
 
 void ggml_cuda_op_cumsum(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {

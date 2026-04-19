@@ -78,9 +78,11 @@ static void solve_tri_f32_cublas(ggml_backend_cuda_context & ctx,
     GGML_UNUSED_VARS(s12, s13);
 }
 
+#if !defined(GGML_USE_ILUVATAR) && !defined(__ILUVATAR__)
 // ======================
 // Fast Kernel (n <= 64, k <= 32) - Warp-based parallel reduction
 // ======================
+// Fast kernel causes llc crash on Iluvatar due to SGPR spill issues
 // When ncols_template == 0 the bounds for the loops in this function are not
 // known and can't be unrolled. As we want to keep pragma unroll for all other
 // cases we suppress the clang transformation warning here.
@@ -248,6 +250,7 @@ static void solve_tri_f32_cuda(const float * A,
             <<<grid, threads, 0, stream>>>(A, B, X, ne02_fd, nb02, nb03, nb12, nb13, nb2, nb3, n, k);
     }
 }
+#endif // !defined(GGML_USE_ILUVATAR) && !defined(__ILUVATAR__)
 
 void ggml_cuda_op_solve_tri(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];  // A (n×n, lower triangular)
@@ -261,6 +264,13 @@ void ggml_cuda_op_solve_tri(ggml_backend_cuda_context & ctx, ggml_tensor * dst) 
     const int64_t ne02 = src0->ne[2];
     const int64_t ne03 = src0->ne[3];
 
+#if defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
+    // Iluvatar: always use cublas to avoid llc crash with fast kernel
+    solve_tri_f32_cublas(ctx, (const float *) src0->data, (const float *) src1->data, (float *) dst->data, n, k,
+                         ne02, ne03, src0->nb[2] / sizeof(float), src0->nb[3] / sizeof(float),
+                         src1->nb[2] / sizeof(float), src1->nb[3] / sizeof(float), dst->nb[2] / sizeof(float),
+                         dst->nb[3] / sizeof(float), ctx.stream());
+#else
     if (n <= MAX_N_FAST && k <= MAX_K_FAST) {
         solve_tri_f32_cuda((const float *) src0->data, (const float *) src1->data, (float *) dst->data, n, k,
                            src0->ne[2], src0->ne[3], src0->nb[2] / sizeof(float), src0->nb[3] / sizeof(float),
@@ -272,4 +282,5 @@ void ggml_cuda_op_solve_tri(ggml_backend_cuda_context & ctx, ggml_tensor * dst) 
                              src1->nb[2] / sizeof(float), src1->nb[3] / sizeof(float), dst->nb[2] / sizeof(float),
                              dst->nb[3] / sizeof(float), ctx.stream());
     }
+#endif // defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
 }

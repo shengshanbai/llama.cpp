@@ -362,6 +362,18 @@ static constexpr __device__ int ggml_cuda_get_max_cpy_bytes() {
 }
 
 
+#if defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
+// Iluvatar CoreX SDK: simplified no_device_code function without [[noreturn]] attribute
+// to avoid CFG annotation issues
+static __device__ void no_device_code(
+    const char * file_name, const int line, const char * function_name, const int arch, const char * arch_list) {
+    printf("%s:%d: ERROR: Iluvatar kernel %s has no device code compatible with arch %d.\n",
+           file_name, line, function_name, arch);
+    GGML_UNUSED(arch_list);
+    // Use infinite loop instead of __builtin_unreachable for simpler CFG
+    while(1) {}
+}
+#else
 [[noreturn]]
 static __device__ void no_device_code(
     const char * file_name, const int line, const char * function_name, const int arch, const char * arch_list) {
@@ -370,18 +382,24 @@ static __device__ void no_device_code(
     printf("%s:%d: ERROR: HIP kernel %s has no device code compatible with HIP arch %d.\n",
            file_name, line, function_name, arch);
     GGML_UNUSED(arch_list);
+#elif defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
+    printf("%s:%d: ERROR: Iluvatar kernel %s has no device code compatible with arch %d.\n",
+           file_name, line, function_name, arch);
+    GGML_UNUSED(arch_list);
 #else
     printf("%s:%d: ERROR: CUDA kernel %s has no device code compatible with CUDA arch %d. ggml-cuda.cu was compiled for: %s\n",
            file_name, line, function_name, arch, arch_list);
 #endif // defined(GGML_USE_HIP)
+
+#if defined(GGML_USE_MUSA) || defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
+    __builtin_unreachable();
+#else
     __trap();
+#endif
 
     GGML_UNUSED(no_device_code); // suppress unused function warning
-
-#if defined(GGML_USE_MUSA)
-    __builtin_unreachable();
-#endif // defined(GGML_USE_MUSA)
 }
+#endif // defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
 
 #ifdef __CUDA_ARCH__
 #define NO_DEVICE_CODE no_device_code(__FILE__, __LINE__, __FUNCTION__, __CUDA_ARCH__, STRINGIZE(__CUDA_ARCH_LIST__))

@@ -40,9 +40,29 @@ static __global__ void dequantize_block(const void * __restrict__ vx, dst_t * __
     }
 }
 
+#if defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
+// Iluvatar-specific implementation: simplest possible kernel - no loops, no shared memory, no sync
+static __global__ void dequantize_block_q8_0_f16_iluvatar(const void * __restrict__ vx, half * __restrict__ y) {
+    // Each thread processes one element directly
+    // blockIdx.x gives the block index, threadIdx.x gives thread index within block
+    const int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    const block_q8_0 * block = (const block_q8_0 *)vx + i / QK8_0;
+    const half d = block->d;
+    const int8_t q = block->qs[i % QK8_0];
+
+    y[i] = __hmul(d, __int2half_rn(q));
+}
+#endif // defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
+
 template <bool need_check>
 static __global__ void dequantize_block_q8_0_f16(const void * __restrict__ vx, half * __restrict__ y, const int64_t k) {
 #if __CUDA_ARCH__ >= GGML_CUDA_CC_PASCAL
+#if defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
+    // Iluvatar uses separate kernel above - this template is not used
+    GGML_UNUSED_VARS(vx, y, k);
+#else
+    // Original NVIDIA CUDA version with loop unrolling
     constexpr int nint = CUDA_Q8_0_NE_ALIGN/sizeof(int) + WARP_SIZE;
 
     const int64_t   i0 = CUDA_Q8_0_NE_ALIGN*blockIdx.x;
@@ -75,6 +95,7 @@ static __global__ void dequantize_block_q8_0_f16(const void * __restrict__ vx, h
 
         y2[iy/2 + threadIdx.x] = __hmul2(make_half2(qs.x, qs.y), __half2half2(d));
     }
+#endif // defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
 #else
     GGML_UNUSED_VARS(vx, y, k);
     NO_DEVICE_CODE;
@@ -503,6 +524,12 @@ static void dequantize_block_cont_cuda(const void * __restrict__ vx, dst_t * __r
 }
 
 static void dequantize_block_q8_0_f16_cuda(const void * __restrict__ vx, half * __restrict__ y, const int64_t k, cudaStream_t stream) {
+#if defined(GGML_USE_ILUVATAR) || defined(__ILUVATAR__)
+    // Iluvatar-specific: simple kernel with one thread per element
+    const int num_threads = 256;
+    const int num_blocks = (k + num_threads - 1) / num_threads;
+    dequantize_block_q8_0_f16_iluvatar<<<num_blocks, num_threads, 0, stream>>>(vx, y);
+#else
     const int num_blocks = (k + CUDA_Q8_0_NE_ALIGN - 1) / CUDA_Q8_0_NE_ALIGN;
     if (k % CUDA_Q8_0_NE_ALIGN == 0) {
         const bool need_check = false;
@@ -511,6 +538,7 @@ static void dequantize_block_q8_0_f16_cuda(const void * __restrict__ vx, half * 
         const bool need_check = true;
         dequantize_block_q8_0_f16<need_check><<<num_blocks, WARP_SIZE, 0, stream>>>(vx, y, k);
     }
+#endif
 }
 
 template<typename dst_t>
