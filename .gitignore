@@ -44,7 +44,6 @@
 
 /tags
 /.build/
-/build*
 /release
 /debug
 /libllama.so
@@ -139,7 +138,7 @@ poetry.toml
 /run-chat.sh
 /run-spec.sh
 /.ccache/
-
+build/
 # IDE
 /*.code-workspace
 /.windsurf/

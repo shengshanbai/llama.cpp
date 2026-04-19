@@ -268,6 +268,12 @@ int get_mmvq_mmid_max_batch(ggml_type type, int cc) {
     return MMVQ_MAX_BATCH_SIZE;
 }
 
+// Host function: returns true if MMVQ should be used for the given type and compute capability.
+bool ggml_cuda_should_use_mmvq(ggml_type type, int cc) {
+    // All supported architectures can use MMVQ for quantized types
+    return ggml_is_quantized(type);
+}
+
 // Device constexpr: returns the max batch size for the current arch+type at compile time.
 template <ggml_type type>
 static constexpr __device__ int get_mmvq_mmid_max_batch_for_device() {
