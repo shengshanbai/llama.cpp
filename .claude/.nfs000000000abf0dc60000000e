@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(clang --version)",
+      "Bash(nvcc --version)",
+      "Bash(ixcc --version)",
+      "Bash(/usr/local/corex/bin/nvcc --help)",
+      "Bash(/usr/local/corex/bin/nvcc *)",
+      "Bash(cmake *)",
+      "Bash(/usr/local/corex/bin/clang --help)",
+      "Bash(/usr/local/corex/bin/clang -xcuda --cuda-gpu-arch=ivcore11 --cuda-path=/usr/local/corex -c /dev/null)",
+      "Bash(/usr/local/corex/bin/clang++ --help)",
+      "Bash(tee build.log)",
+      "Bash(./build/bin/llama-cli *)",
+      "Bash(/usr/local/corex/bin/llc --help)",
+      "Bash(/usr/local/corex/bin/llc --help-hidden)",
+      "Bash(/usr/local/corex/bin/clang++ -E -x ivcore --cuda-path=/usr/local/corex -DGGML_USE_ILUVATAR -D__ILUVATAR__ -std=c++17 /tmp/output/llama.cpp/ggml/src/ggml-cuda/convert.cu)",
+      "Bash(/usr/local/corex/bin/clang++ -E -x ivcore --cuda-path=/usr/local/corex -DGGML_USE_ILUVATAR -D__ILUVATAR__ -D__CUDA_ARCH__=600 -std=c++17 /tmp/output/llama.cpp/ggml/src/ggml-cuda/convert.cu)",
+      "Bash(ldd /tmp/output/llama.cpp/build/bin/libggml-cuda.so)",
+      "Bash(chmod +x /tmp/output/llama.cpp/build_ixml.sh)",
+      "Bash(./build_ixml.sh --clean --nccl)"
+    ]
+  }
+}
